@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>Mecesoft.Data.EntityFrameworkCore.PostgreSql.Tenancy</AssemblyName>
+    <RootNamespace>Mecesoft.Data.EntityFrameworkCore.PostgreSql.Tenancy</RootNamespace>
+    <PackageId>Mecesoft.Data.EntityFrameworkCore.PostgreSql.Tenancy</PackageId>
+    <Description>PostgreSQL production tenant collation verification for Mecesoft.Data.</Description>
+    <PackageTags>mecesoft;data-access;entity-framework-core;postgresql;tenancy</PackageTags>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../Mecesoft.Data.EntityFrameworkCore/Mecesoft.Data.EntityFrameworkCore.csproj" />
+    <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.SourceLink.GitHub" PrivateAssets="All" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Mecesoft.Data.EntityFrameworkCore.PostgreSql.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="/" />
+    <None Include="../../LICENSE" Pack="true" PackagePath="/" Link="LICENSE" />
+  </ItemGroup>
+</Project>

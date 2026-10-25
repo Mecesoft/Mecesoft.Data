@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>Mecesoft.Data.EntityFrameworkCore.SqlServer.Tenancy</AssemblyName>
+    <RootNamespace>Mecesoft.Data.EntityFrameworkCore.SqlServer.Tenancy</RootNamespace>
+    <PackageId>Mecesoft.Data.EntityFrameworkCore.SqlServer.Tenancy</PackageId>
+    <Description>SQL Server production tenant collation verification for Mecesoft.Data.</Description>
+    <PackageTags>mecesoft;data-access;entity-framework-core;sqlserver;tenancy</PackageTags>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../Mecesoft.Data.EntityFrameworkCore/Mecesoft.Data.EntityFrameworkCore.csproj" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.SqlServer" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" />
+    <PackageReference Include="System.Security.Cryptography.Pkcs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.SourceLink.GitHub" PrivateAssets="All" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Mecesoft.Data.EntityFrameworkCore.SqlServer.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="/" />
+    <None Include="../../LICENSE" Pack="true" PackagePath="/" Link="LICENSE" />
+  </ItemGroup>
+</Project>

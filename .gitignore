@@ -1,0 +1,33 @@
+**/bin/
+**/obj/
+artifacts/
+packages/
+TestResults/
+coverage/
+
+.DS_Store
+.idea/
+.vs/
+*.user
+*.suo
+*.iml
+_ReSharper.Caches/
+*.nupkg
+*.snupkg
+
+# Legacy reference tree is intentionally outside the active repository.
+legacy/
+
+# Local secrets and machine-specific configuration.
+.env
+.env.*
+secrets/
+secrets.json
+*.secret
+*.pfx
+*.snk
+*.pem
+*.key
+local.settings.json
+appsettings.*.local.json
+.vscode/

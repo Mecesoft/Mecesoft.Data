@@ -1,0 +1,205 @@
+name: CI
+
+# Required repository secrets for the provider integration job:
+# - MECESOFT_CI_SQLSERVER_PASSWORD
+# - MECESOFT_CI_POSTGRES_PASSWORD
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_NOLOGO: "true"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "true"
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: "true"
+
+jobs:
+  build-test:
+    name: Build, unit tests, vulnerability
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.402"
+
+      - name: Restore
+        run: dotnet restore Mecesoft.Data.sln
+
+      - name: Build Release
+        run: dotnet build Mecesoft.Data.sln -c Release --no-restore
+
+      - name: Abstractions tests
+        run: dotnet test tests/Mecesoft.Data.Tests/Mecesoft.Data.Tests.csproj -c Release --no-build
+
+      - name: EF Core tests
+        run: dotnet test tests/Mecesoft.Data.EntityFrameworkCore.Tests/Mecesoft.Data.EntityFrameworkCore.Tests.csproj -c Release --no-build
+
+      - name: Vulnerability audit
+        run: dotnet list Mecesoft.Data.sln package --vulnerable --include-transitive
+
+  provider-integration:
+    name: SQL Server and PostgreSQL integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      sqlserver:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: "Y"
+          MSSQL_SA_PASSWORD: ${{ secrets.MECESOFT_CI_SQLSERVER_PASSWORD }}
+        ports:
+          - 1433:1433
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: ${{ secrets.MECESOFT_CI_POSTGRES_PASSWORD }}
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.402"
+
+      - name: Restore
+        run: dotnet restore Mecesoft.Data.sln
+
+      - name: Build Release
+        run: dotnet build Mecesoft.Data.sln -c Release --no-restore
+
+      - name: Wait for SQL Server port
+        run: |
+          for attempt in {1..30}; do
+            if (echo > /dev/tcp/127.0.0.1/1433) >/dev/null 2>&1; then
+              sleep 5
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "SQL Server did not open port 1433"
+          exit 1
+
+      - name: SQL Server tests
+        env:
+          MECESOFT_SQLSERVER_TEST_CONNECTION: "Server=127.0.0.1,1433;Database=master;User Id=sa;Password=${{ secrets.MECESOFT_CI_SQLSERVER_PASSWORD }};TrustServerCertificate=True;Encrypt=True;Connect Timeout=30"
+        run: dotnet test tests/Mecesoft.Data.EntityFrameworkCore.SqlServer.Tests/Mecesoft.Data.EntityFrameworkCore.SqlServer.Tests.csproj -c Release --no-build
+
+      - name: PostgreSQL tests
+        env:
+          MECESOFT_POSTGRES_TEST_CONNECTION: "Host=127.0.0.1;Port=5432;Database=postgres;Username=postgres;Password=${{ secrets.MECESOFT_CI_POSTGRES_PASSWORD }};Timeout=30"
+        run: dotnet test tests/Mecesoft.Data.EntityFrameworkCore.PostgreSql.Tests/Mecesoft.Data.EntityFrameworkCore.PostgreSql.Tests.csproj -c Release --no-build
+
+  pack:
+    name: Pack and validate NuGet packages
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [ build-test, provider-integration ]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.402"
+
+      - name: Restore
+        run: dotnet restore Mecesoft.Data.sln
+
+      - name: Pack
+        run: |
+          mkdir -p artifacts/packages
+          dotnet pack src/Mecesoft.Data.Abstractions/Mecesoft.Data.Abstractions.csproj -c Release --no-restore -o artifacts/packages
+          dotnet pack src/Mecesoft.Data.EntityFrameworkCore/Mecesoft.Data.EntityFrameworkCore.csproj -c Release --no-restore -o artifacts/packages
+          dotnet pack src/Mecesoft.Data.EntityFrameworkCore.SqlServer.Tenancy/Mecesoft.Data.EntityFrameworkCore.SqlServer.Tenancy.csproj -c Release --no-restore -o artifacts/packages
+          dotnet pack src/Mecesoft.Data.EntityFrameworkCore.PostgreSql.Tenancy/Mecesoft.Data.EntityFrameworkCore.PostgreSql.Tenancy.csproj -c Release --no-restore -o artifacts/packages
+
+      - name: Validate package contents and SourceLink
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd artifacts/packages
+          test "$(find . -maxdepth 1 -name '*.nupkg' | wc -l)" -eq 4
+          test "$(find . -maxdepth 1 -name '*.snupkg' | wc -l)" -eq 4
+
+          expected_packages=(
+            Mecesoft.Data.Abstractions.1.0.0.nupkg
+            Mecesoft.Data.EntityFrameworkCore.1.0.0.nupkg
+            Mecesoft.Data.EntityFrameworkCore.SqlServer.Tenancy.1.0.0.nupkg
+            Mecesoft.Data.EntityFrameworkCore.PostgreSql.Tenancy.1.0.0.nupkg
+          )
+
+          for package in "${expected_packages[@]}"; do
+            test -f "$package"
+            nuspec=$(unzip -p "$package" '*.nuspec')
+            echo "$nuspec" | grep -q '<version>1.0.0</version>'
+            echo "$nuspec" | grep -q '<repository type="git" url="https://github.com/Mecesoft/Mecesoft.Data"'
+            if echo "$nuspec" | grep -qi 'Microsoft.SourceLink'; then
+              echo "SourceLink must remain a build-time-only dependency"
+              exit 1
+            fi
+
+            unzip -l "$package" | grep -Eq 'README\.md'
+            unzip -l "$package" | grep -Eq 'LICENSE'
+            unzip -l "$package" | grep -Eq 'lib/net10\.0/[^/]+\.dll'
+            unzip -l "$package" | grep -Eq 'lib/net10\.0/[^/]+\.xml'
+
+            symbols="${package%.nupkg}.snupkg"
+            test -f "$symbols"
+            unzip -l "$symbols" | grep -Eq 'lib/net10\.0/[^/]+\.pdb'
+
+            pdb=$(mktemp)
+            unzip -p "$symbols" 'lib/net10.0/*.pdb' > "$pdb"
+            grep -aEq 'github\.com/Mecesoft/Mecesoft\.Data|raw\.githubusercontent\.com/Mecesoft/Mecesoft\.Data' "$pdb"
+            rm -f "$pdb"
+          done
+
+          if unzip -p Mecesoft.Data.EntityFrameworkCore.SqlServer.Tenancy.1.0.0.nupkg '*.nuspec' \
+              | grep -q 'System.Security.Cryptography.Pkcs" version="10.0.13"'; then
+            echo "Pkcs security pin present"
+          else
+            echo "Pkcs security pin is missing"
+            exit 1
+          fi
+
+      - name: Local-feed package smoke
+        run: |
+          dotnet restore tests/Mecesoft.Data.PackageSmoke/Mecesoft.Data.PackageSmoke.csproj \
+            --configfile tests/Mecesoft.Data.PackageSmoke/NuGet.Config \
+            --force --no-cache
+          output=$(dotnet run --project tests/Mecesoft.Data.PackageSmoke/Mecesoft.Data.PackageSmoke.csproj \
+            -c Release --no-restore)
+          echo "$output"
+          echo "$output" | grep -q '^Mecesoft.Tenant|True|SmokeEntity|'
+
+      - name: Upload packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuget-packages
+          path: |
+            artifacts/packages/*.nupkg
+            artifacts/packages/*.snupkg

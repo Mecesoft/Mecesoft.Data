@@ -1,8 +1,8 @@
 name: CI
 
-# Required repository secrets for the provider integration job:
-# - MECESOFT_CI_SQLSERVER_PASSWORD
-# - MECESOFT_CI_POSTGRES_PASSWORD
+# Provider integration uses throwaway database containers with credentials
+# generated at runtime. No repository secrets are required, so the workflow
+# also works for pull requests from forks.
 
 on:
   push:
@@ -47,31 +47,21 @@ jobs:
         run: dotnet test tests/Mecesoft.Data.EntityFrameworkCore.Tests/Mecesoft.Data.EntityFrameworkCore.Tests.csproj -c Release --no-build
 
       - name: Vulnerability audit
-        run: dotnet list Mecesoft.Data.sln package --vulnerable --include-transitive
+        shell: bash
+        run: |
+          set -euo pipefail
+          dotnet list Mecesoft.Data.sln package --vulnerable --include-transitive --format json > vulnerability-report.json
+          if ! jq -e '[.. | objects | .vulnerabilities? // empty] | length == 0' vulnerability-report.json > /dev/null; then
+            echo "Vulnerable packages detected:"
+            jq -r '.. | objects | select(has("vulnerabilities")) | "\(.id) \(.resolvedVersion // .requestedVersion // "unknown"): \(.vulnerabilities[].severity)"' vulnerability-report.json
+            exit 1
+          fi
+          echo "No vulnerable packages found."
 
   provider-integration:
     name: SQL Server and PostgreSQL integration
     runs-on: ubuntu-latest
-    timeout-minutes: 25
-    services:
-      sqlserver:
-        image: mcr.microsoft.com/mssql/server:2022-latest
-        env:
-          ACCEPT_EULA: "Y"
-          MSSQL_SA_PASSWORD: ${{ secrets.MECESOFT_CI_SQLSERVER_PASSWORD }}
-        ports:
-          - 1433:1433
-      postgres:
-        image: postgres:17
-        env:
-          POSTGRES_PASSWORD: ${{ secrets.MECESOFT_CI_POSTGRES_PASSWORD }}
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 12
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -83,33 +73,94 @@ jobs:
         with:
           dotnet-version: "10.0.402"
 
+      - name: Start database containers
+        shell: bash
+        run: |
+          set -euo pipefail
+          sqlserver_password="$(openssl rand -base64 32 | tr -d '\n' | tr '/+=' 'XyZ')Aa1!"
+          postgres_password="$(openssl rand -hex 24)"
+          echo "::add-mask::$sqlserver_password"
+          echo "::add-mask::$postgres_password"
+          {
+            echo "MECESOFT_CI_SQLSERVER_PASSWORD=$sqlserver_password"
+            echo "MECESOFT_CI_POSTGRES_PASSWORD=$postgres_password"
+          } >> "$GITHUB_ENV"
+
+          docker run --detach --name mecesoft-ci-sqlserver \
+            --env ACCEPT_EULA=Y \
+            --env MSSQL_SA_PASSWORD="$sqlserver_password" \
+            --publish 1433:1433 \
+            mcr.microsoft.com/mssql/server:2022-latest
+
+          docker run --detach --name mecesoft-ci-postgres \
+            --env POSTGRES_PASSWORD="$postgres_password" \
+            --publish 5432:5432 \
+            postgres:17
+
+      - name: Wait for SQL Server
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in {1..60}; do
+            running=$(docker inspect --format '{{.State.Running}}' mecesoft-ci-sqlserver 2>/dev/null || echo false)
+            if [[ "$running" != "true" ]]; then
+              docker logs mecesoft-ci-sqlserver 2>&1 | tail -50
+              echo "SQL Server container exited before becoming ready"
+              exit 1
+            fi
+            if docker exec mecesoft-ci-sqlserver /opt/mssql-tools18/bin/sqlcmd \
+                -S localhost -U sa -P "$MECESOFT_CI_SQLSERVER_PASSWORD" -C -Q 'SELECT 1' >/dev/null 2>&1; then
+              echo "SQL Server ready after ${attempt} attempt(s)"
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs mecesoft-ci-sqlserver 2>&1 | tail -50
+          echo "SQL Server did not become ready"
+          exit 1
+
+      - name: Wait for PostgreSQL
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in {1..60}; do
+            running=$(docker inspect --format '{{.State.Running}}' mecesoft-ci-postgres 2>/dev/null || echo false)
+            if [[ "$running" != "true" ]]; then
+              docker logs mecesoft-ci-postgres 2>&1 | tail -50
+              echo "PostgreSQL container exited before becoming ready"
+              exit 1
+            fi
+            if docker exec mecesoft-ci-postgres pg_isready -U postgres >/dev/null 2>&1; then
+              echo "PostgreSQL ready after ${attempt} attempt(s)"
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs mecesoft-ci-postgres 2>&1 | tail -50
+          echo "PostgreSQL did not become ready"
+          exit 1
+
       - name: Restore
         run: dotnet restore Mecesoft.Data.sln
 
       - name: Build Release
         run: dotnet build Mecesoft.Data.sln -c Release --no-restore
 
-      - name: Wait for SQL Server port
-        run: |
-          for attempt in {1..30}; do
-            if (echo > /dev/tcp/127.0.0.1/1433) >/dev/null 2>&1; then
-              sleep 5
-              exit 0
-            fi
-            sleep 2
-          done
-          echo "SQL Server did not open port 1433"
-          exit 1
-
       - name: SQL Server tests
-        env:
-          MECESOFT_SQLSERVER_TEST_CONNECTION: "Server=127.0.0.1,1433;Database=master;User Id=sa;Password=${{ secrets.MECESOFT_CI_SQLSERVER_PASSWORD }};TrustServerCertificate=True;Encrypt=True;Connect Timeout=30"
-        run: dotnet test tests/Mecesoft.Data.EntityFrameworkCore.SqlServer.Tests/Mecesoft.Data.EntityFrameworkCore.SqlServer.Tests.csproj -c Release --no-build
+        shell: bash
+        run: |
+          export MECESOFT_SQLSERVER_TEST_CONNECTION="Server=127.0.0.1,1433;Database=master;User Id=sa;Password=${MECESOFT_CI_SQLSERVER_PASSWORD};TrustServerCertificate=True;Encrypt=True;Connect Timeout=30"
+          dotnet test tests/Mecesoft.Data.EntityFrameworkCore.SqlServer.Tests/Mecesoft.Data.EntityFrameworkCore.SqlServer.Tests.csproj -c Release --no-build
 
       - name: PostgreSQL tests
-        env:
-          MECESOFT_POSTGRES_TEST_CONNECTION: "Host=127.0.0.1;Port=5432;Database=postgres;Username=postgres;Password=${{ secrets.MECESOFT_CI_POSTGRES_PASSWORD }};Timeout=30"
-        run: dotnet test tests/Mecesoft.Data.EntityFrameworkCore.PostgreSql.Tests/Mecesoft.Data.EntityFrameworkCore.PostgreSql.Tests.csproj -c Release --no-build
+        shell: bash
+        run: |
+          export MECESOFT_POSTGRES_TEST_CONNECTION="Host=127.0.0.1;Port=5432;Database=postgres;Username=postgres;Password=${MECESOFT_CI_POSTGRES_PASSWORD};Timeout=30"
+          dotnet test tests/Mecesoft.Data.EntityFrameworkCore.PostgreSql.Tests/Mecesoft.Data.EntityFrameworkCore.PostgreSql.Tests.csproj -c Release --no-build
+
+      - name: Stop database containers
+        if: always()
+        run: docker rm --force mecesoft-ci-sqlserver mecesoft-ci-postgres || true
 
   pack:
     name: Pack and validate NuGet packages
@@ -131,6 +182,8 @@ jobs:
         run: dotnet restore Mecesoft.Data.sln
 
       - name: Pack
+        env:
+          CI: "true"
         run: |
           mkdir -p artifacts/packages
           dotnet pack src/Mecesoft.Data.Abstractions/Mecesoft.Data.Abstractions.csproj -c Release --no-restore -o artifacts/packages
@@ -140,9 +193,13 @@ jobs:
 
       - name: Validate package contents and SourceLink
         shell: bash
+        env:
+          GITHUB_SHA: ${{ github.sha }}
+          SOURCE_REPOSITORY: Mecesoft/Mecesoft.Data
         run: |
           set -euo pipefail
           cd artifacts/packages
+
           test "$(find . -maxdepth 1 -name '*.nupkg' | wc -l)" -eq 4
           test "$(find . -maxdepth 1 -name '*.snupkg' | wc -l)" -eq 4
 
@@ -154,32 +211,72 @@ jobs:
           )
 
           for package in "${expected_packages[@]}"; do
-            test -f "$package"
-            nuspec=$(unzip -p "$package" '*.nuspec')
-            echo "$nuspec" | grep -q '<version>1.0.0</version>'
-            echo "$nuspec" | grep -q '<repository type="git" url="https://github.com/Mecesoft/Mecesoft.Data"'
-            if echo "$nuspec" | grep -qi 'Microsoft.SourceLink'; then
-              echo "SourceLink must remain a build-time-only dependency"
+            if [[ ! -f "$package" ]]; then
+              echo "$package: package file is missing"
               exit 1
             fi
 
-            unzip -l "$package" | grep -Eq 'README\.md'
-            unzip -l "$package" | grep -Eq 'LICENSE'
-            unzip -l "$package" | grep -Eq 'lib/net10\.0/[^/]+\.dll'
-            unzip -l "$package" | grep -Eq 'lib/net10\.0/[^/]+\.xml'
+            nuspec=$(unzip -p "$package" '*.nuspec')
+            expected_id="${package%.1.0.0.nupkg}"
+
+            if ! grep -q "<id>${expected_id}</id>" <<<"$nuspec"; then
+              echo "$package: package id ${expected_id} is missing"
+              exit 1
+            fi
+
+            if ! grep -q '<version>1.0.0</version>' <<<"$nuspec"; then
+              echo "$package: version 1.0.0 is missing"
+              exit 1
+            fi
+
+            if ! grep -q '<repository type="git" url="https://github.com/Mecesoft/Mecesoft.Data"' <<<"$nuspec"; then
+              echo "$package: repository URL is missing"
+              exit 1
+            fi
+
+            if ! grep -q "commit=\"${GITHUB_SHA}\"" <<<"$nuspec"; then
+              echo "$package: repository commit ${GITHUB_SHA} is missing"
+              exit 1
+            fi
+
+            if grep -qi 'Microsoft.SourceLink' <<<"$nuspec"; then
+              echo "$package: SourceLink must remain a build-time-only dependency"
+              exit 1
+            fi
+
+            listing=$(unzip -l "$package")
+            for required in 'README\.md' 'LICENSE' 'lib/net10\.0/[^/]+\.dll' 'lib/net10\.0/[^/]+\.xml'; do
+              if ! grep -Eq "$required" <<<"$listing"; then
+                echo "$package: missing required entry matching $required"
+                exit 1
+              fi
+            done
 
             symbols="${package%.nupkg}.snupkg"
-            test -f "$symbols"
-            unzip -l "$symbols" | grep -Eq 'lib/net10\.0/[^/]+\.pdb'
+            if [[ ! -f "$symbols" ]]; then
+              echo "$symbols: symbol package is missing"
+              exit 1
+            fi
+
+            symbol_listing=$(unzip -l "$symbols")
+            if ! grep -Eq 'lib/net10\.0/[^/]+\.pdb' <<<"$symbol_listing"; then
+              echo "$symbols: PDB entry is missing"
+              exit 1
+            fi
 
             pdb=$(mktemp)
+            trap 'rm -f "$pdb"' EXIT
             unzip -p "$symbols" 'lib/net10.0/*.pdb' > "$pdb"
-            grep -aEq 'github\.com/Mecesoft/Mecesoft\.Data|raw\.githubusercontent\.com/Mecesoft/Mecesoft\.Data' "$pdb"
+            if ! grep -aFq "raw.githubusercontent.com/${SOURCE_REPOSITORY}/${GITHUB_SHA}" "$pdb"; then
+              echo "$symbols: SourceLink URL for commit ${GITHUB_SHA} is missing from the PDB"
+              exit 1
+            fi
             rm -f "$pdb"
+            trap - EXIT
           done
 
-          if unzip -p Mecesoft.Data.EntityFrameworkCore.SqlServer.Tenancy.1.0.0.nupkg '*.nuspec' \
-              | grep -q 'System.Security.Cryptography.Pkcs" version="10.0.13"'; then
+          sqlserver_nuspec=$(unzip -p Mecesoft.Data.EntityFrameworkCore.SqlServer.Tenancy.1.0.0.nupkg '*.nuspec')
+          if grep -q 'System.Security.Cryptography.Pkcs" version="10.0.13"' <<<"$sqlserver_nuspec"; then
             echo "Pkcs security pin present"
           else
             echo "Pkcs security pin is missing"
@@ -187,14 +284,16 @@ jobs:
           fi
 
       - name: Local-feed package smoke
+        shell: bash
         run: |
+          set -euo pipefail
           dotnet restore tests/Mecesoft.Data.PackageSmoke/Mecesoft.Data.PackageSmoke.csproj \
             --configfile tests/Mecesoft.Data.PackageSmoke/NuGet.Config \
             --force --no-cache
           output=$(dotnet run --project tests/Mecesoft.Data.PackageSmoke/Mecesoft.Data.PackageSmoke.csproj \
             -c Release --no-restore)
           echo "$output"
-          echo "$output" | grep -q '^Mecesoft.Tenant|True|SmokeEntity|'
+          grep -q '^Mecesoft.Tenant|True|SmokeEntity|' <<<"$output"
 
       - name: Upload packages
         uses: actions/upload-artifact@v4

@@ -99,6 +99,14 @@ internal sealed class SqlServerTestDatabase
             .Options;
     }
 
+    public DbContextOptions<TContext> OptionsWithRetryingExecutionStrategy<TContext>()
+        where TContext : DbContext
+    {
+        return new DbContextOptionsBuilder<TContext>()
+            .UseSqlServer(_connectionString, options => options.EnableRetryOnFailure(3))
+            .Options;
+    }
+
     public DbContextOptions<TContext> OptionsWithProductionTenancy<TContext>()
         where TContext : DbContext
     {

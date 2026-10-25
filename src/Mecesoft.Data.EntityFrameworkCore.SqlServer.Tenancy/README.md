@@ -1,5 +1,10 @@
 # Mecesoft.Data.EntityFrameworkCore.SqlServer.Tenancy
 
+> Mecesoft.Data 1.1.0 ile standart `DbContext`, `IdentityDbContext` ve
+> `Mecesoft.Repository` uyumluluk katmanı desteklenir. Bu paket yalnızca row-per-tenant
+> production collation/relationship doğrulaması için gereklidir; tenant kullanmayan veya
+> DB-per-tenant uygulamalar bu pakete ihtiyaç duymaz.
+
 Opsiyonel SQL Server production tenant collation doğrulama paketi.
 
 ## Kapsam

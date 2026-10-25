@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>Mecesoft.Data.DocumentationSamples</AssemblyName>
+    <RootNamespace>Mecesoft.Data.DocumentationSamples</RootNamespace>
+    <IsPackable>false</IsPackable>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.Identity.EntityFrameworkCore" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.SqlServer" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" />
+    <PackageReference Include="System.Security.Cryptography.Pkcs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/Mecesoft.Data.Abstractions/Mecesoft.Data.Abstractions.csproj" />
+    <ProjectReference Include="../../src/Mecesoft.Data.EntityFrameworkCore/Mecesoft.Data.EntityFrameworkCore.csproj" />
+  </ItemGroup>
+</Project>

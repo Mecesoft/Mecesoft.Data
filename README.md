@@ -1,6 +1,6 @@
 # Mecesoft.Data
 
-Mecesoft.Data, yeniden kullanılabilir veri erişim bileşenleri için .NET 10 tabanlı bir paket ailesidir. Bu repository şu anda solution foundation aşamasındadır; CRUD, Unit of Work, Specification, tenant filtreleri ve provider adaptörleri henüz public API olarak yayımlanmamıştır.
+Mecesoft.Data, yeniden kullanılabilir veri erişim bileşenleri için .NET 10 tabanlı bir paket ailesidir. 1.1.0 sürümü, eski `Mecesoft.Repository` API'sini kaynak uyumlu bir katmanla geri getirirken 1.0.0'ın fail-closed tenant, soft-delete, concurrency ve SaveChanges güvenlik modelini korur. Kütüphane standart `DbContext`, `IdentityDbContext`, kullanıcı tanımlı context'ler ve isteğe bağlı `MecesoftDbContext` ile kullanılabilir.
 
 ## Projeler
 
@@ -14,16 +14,292 @@ Mecesoft.Data, yeniden kullanılabilir veri erişim bileşenleri için .NET 10 t
 ## Hedefler
 
 - Target framework: `net10.0`
-- Başlangıç paket sürümü: `1.0.0`
+- Güncel paket sürümü: `1.1.0`
 - Lisans: MIT
 - Nullable reference types, implicit usings, .NET analyzers ve XML documentation aktiftir.
 - Paket sürümleri Central Package Management ile yönetilir.
 
 ## Mimari sınırlar
 
-`Mecesoft.Data.Abstractions` EF Core'a bağımlı değildir. `Mecesoft.Data.EntityFrameworkCore` yalnızca `Microsoft.EntityFrameworkCore.Relational` ve abstractions projesine bağlıdır; SQL Server, PostgreSQL, MySQL/MariaDB, SQLite veya Oracle provider paketlerinden herhangi birini doğrudan taşımaz.
+`Mecesoft.Data.Abstractions` EF Core'a bağımlı değildir. `Mecesoft.Repository` uyumluluk tipleri, EF Core'a ve `DbContext`'e ihtiyaç duydukları için `Mecesoft.Data.EntityFrameworkCore` paketinde yer alır. `Mecesoft.Data.EntityFrameworkCore` yalnızca `Microsoft.EntityFrameworkCore.Relational` ve abstractions projesine bağlıdır; SQL Server, PostgreSQL, MySQL/MariaDB, SQLite veya Oracle provider paketlerinden herhangi birini doğrudan taşımaz.
 
 Eski `Mecesoft.Repository` kaynakları davranış envanteriyle birlikte `legacy/` altında, aktif solution dışında korunur. Bu kaynaklar yeni paketlerin derlemesine dahil edilmez.
+
+
+## 1.1.0: Mecesoft.Repository uyumluluğu ve evrensel DbContext desteği
+
+1.1.0, 1.0.0 public API'lerini kaldırmaz. Eklenen uyumluluk katmanı ayrı bir namespace'te
+(`Mecesoft.Repository`) yaşar ve güvenlik açısından açıkça işaretlenmiştir:
+
+- `Mecesoft.Repository.IRepository<TEntity>` ve `Repository<TEntity, TContext>` eski imzaları korur.
+- `Mecesoft.Repository.IUnitOfWork` ve `UnitOfWork<TContext>` genel amaçlı transaction/save akışı sağlar.
+- `MecesoftDbContext` zorunlu değildir; standart ve Identity context'leri desteklenir.
+- Tenant kullanmayan uygulamalar için tenant resolver zorunluluğu yoktur.
+- Row-per-tenant kullanan uygulamalar mevcut `MecesoftDbContext` ve güvenli repository'leri kullanmaya devam eder.
+
+### Kurulum
+
+```bash
+dotnet add package Mecesoft.Data.Abstractions --version 1.1.0
+dotnet add package Mecesoft.Data.EntityFrameworkCore --version 1.1.0
+
+# Yalnızca SQL Server/PostgreSQL row-level tenant doğrulaması gerekiyorsa:
+dotnet add package Mecesoft.Data.EntityFrameworkCore.SqlServer.Tenancy --version 1.1.0
+dotnet add package Mecesoft.Data.EntityFrameworkCore.PostgreSql.Tenancy --version 1.1.0
+```
+
+Provider bağımlılıkları ana pakete zorunlu olarak yüklenmez. SQL Server veya PostgreSQL
+uygulaması kendi provider paketini seçer.
+
+### Standart DbContext ve IdentityDbContext
+
+```csharp
+using Microsoft.AspNetCore.Identity;
+using Microsoft.AspNetCore.Identity.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore;
+
+public sealed class AppDbContext : DbContext
+{
+    public AppDbContext(DbContextOptions<AppDbContext> options) : base(options) { }
+
+    public DbSet<Order> Orders => Set<Order>();
+}
+
+public sealed class AppIdentityDbContext : IdentityDbContext<IdentityUser>
+{
+    public AppIdentityDbContext(DbContextOptions<AppIdentityDbContext> options) : base(options) { }
+
+    public DbSet<Order> Orders => Set<Order>();
+}
+```
+
+`Repository<TEntity, TContext>` yalnızca `TContext : DbContext` ister; dolayısıyla standart,
+Identity ve kullanıcı tanımlı context'lerle aynı şekilde çalışır.
+
+### Eski repository API'si
+
+```csharp
+using Mecesoft.Repository;
+using Microsoft.EntityFrameworkCore;
+
+IRepository<Order> repository = new Repository<Order, AppDbContext>(context);
+
+IQueryable<Order> query = repository.GetAll(asNoTracking: true)
+    .Include(order => order.Lines)
+    .ThenInclude(line => line.Product)
+    .Where(order => order.Total > 0);
+
+List<Order> orders = await query.ToListAsync();
+
+Order? byExpression = await repository.GetByExpressionAsync(
+    order => order.Number == "ORD-1");
+
+string? customer = await repository.GetByExpressionDtoAsync(
+    order => order.Number == "ORD-1",
+    order => order.CustomerName);
+
+bool exists = await repository.AnyAsync(order => order.Number == "ORD-1");
+```
+
+`GetAll` ve `Where` doğrudan `IQueryable<TEntity>` döndürür. `Include`, `ThenInclude`,
+`AsNoTracking`, `OrderBy`, `Select` ve diğer EF Core LINQ operatörleri değişmeden kullanılabilir.
+
+Pagination:
+
+```csharp
+using Mecesoft.Data.Abstractions.Pagination;
+
+PageResult<Order> page = await repository.GetAll()
+    .OrderBy(order => order.Number)
+    .ToPageAsync(new PageRequest(pageNumber: 1, pageSize: 20));
+
+PageResult<Order> stablePage = await repository.GetAll()
+    .ToStablePageAsync(new PageRequest(1, 20), order => order.Id);
+```
+
+`ToPageAsync` sıralanmış bir query bekler. `ToStablePageAsync` verilen benzersiz key ile sıralar.
+
+### Unit of Work
+
+```csharp
+using Mecesoft.Repository;
+
+IUnitOfWork unitOfWork = new UnitOfWork<AppDbContext>(context);
+
+await repository.AddAsync(order);
+await unitOfWork.SaveChangesAsync();
+
+await unitOfWork.BeginTransactionAsync();
+try
+{
+    await repository.AddAsync(auditEntry);
+    await unitOfWork.SaveChangesAsync();
+    await unitOfWork.CommitTransactionAsync();
+}
+catch
+{
+    await unitOfWork.RollbackTransactionAsync();
+    throw;
+}
+```
+
+Retry execution strategy kullanan provider'larda explicit `BeginTransactionAsync` desteklenmez;
+EF Core user-initiated transaction ile retry strategy'yi birlikte çalıştırmaz. Bu provider'larda
+tek çağrıda atomik ve retriable iş için:
+
+```csharp
+await unitOfWork.ExecuteInTransactionAsync(async cancellationToken =>
+{
+    await repository.AddAsync(order, cancellationToken);
+    await repository.AddAsync(auditEntry, cancellationToken);
+});
+```
+
+`ExecuteInTransactionAsync` işi, `SaveChangesAsync` çağrısını ve commit'i tek execution strategy
+kapsamında çalıştırır; hata halinde rollback yapar. Aynı scoped `UnitOfWork` ve context üzerinden
+birden fazla repository aynı change tracker'ı paylaşır.
+
+### RowVersion ve detached concurrency
+
+SQL Server `[Timestamp]` / `IsRowVersion()` ve PostgreSQL uygun concurrency token'ları korunur.
+
+```csharp
+public sealed class Order
+{
+    public Guid Id { get; set; }
+
+    public string Number { get; set; } = string.Empty;
+
+    [Timestamp]
+    public byte[] RowVersion { get; set; } = [];
+}
+
+// Model yapılandırması
+modelBuilder.Entity<Order>().Property(order => order.RowVersion).IsRowVersion();
+
+// Detached update: orijinal token açıkça sabitlenir
+var concurrencyRepository = new Repository<Order, AppDbContext>(context);
+byte[] originalRowVersion = loadedOrder.RowVersion.ToArray();
+loadedOrder.Number = "ORD-2";
+concurrencyRepository.Update(loadedOrder, originalRowVersion);
+await unitOfWork.SaveChangesAsync();
+```
+
+Token uyuşmazsa EF Core `DbUpdateConcurrencyException` fırlatır. Uygulama-managed token'larda
+(entity'de yeni değer taşınıyorsa) güncel değer entity üzerinde set edilmeli, orijinal değer
+`Update(entity, originalConcurrencyToken)` ile verilmelidir.
+
+### Soft delete ve restore (opsiyonel)
+
+Tenant kullanmayan standart context'lerde:
+
+```csharp
+public sealed class Invoice : ISoftDeletable
+{
+    public Guid Id { get; set; }
+    public bool IsDeleted { get; set; }
+    public DateTimeOffset? DeletedAtUtc { get; set; }
+}
+
+protected override void OnModelCreating(ModelBuilder modelBuilder)
+{
+    base.OnModelCreating(modelBuilder);
+    modelBuilder.ApplyMecesoftSoftDeleteFilters();
+}
+
+var softDelete = new SoftDeleteService<AppDbContext, Invoice, Guid>(
+    context,
+    invoice => invoice.Id);
+
+await softDelete.SoftDeleteAsync(invoiceId);
+await softDelete.RestoreAsync(invoiceId);
+```
+
+`ApplyMecesoftSoftDeleteFilters` yalnızca `Mecesoft.SoftDelete` adlı filtreyi kurar. Servis yalnızca
+bu filtreyi kaldırır; tenant veya uygulama filtrelerini kaldırmaz. `MecesoftDbContext` üzerinde
+soft-delete/restore yalnızca yetkilendirilmiş güvenli repository ile yapılmalıdır; servis bu
+context'te fail-closed olarak reddeder.
+
+Eski `includeDeleted` parametresi de yalnızca adlandırılmış soft-delete filtresini kaldırır:
+
+```csharp
+List<Invoice> all = await repository.GetAll(includeDeleted: true).ToListAsync();
+```
+
+Bu parametre tenant-owned olmayan `ISoftDeletable` entity'lerde ve `MecesoftDbContext` dışında
+kullanılabilir. `MecesoftDbContext` üzerinde veya filtre tanımlı değilse fail-closed hata verir.
+Eski davranıştaki "tüm filtreleri kaldır" semantiği bilinçli olarak geri getirilmemiştir.
+
+### Audit alanları (opsiyonel)
+
+```csharp
+public sealed class Invoice : IAuditable
+{
+    public Guid Id { get; set; }
+    public DateTimeOffset CreatedAtUtc { get; set; }
+    public string? CreatedBy { get; set; }
+    public DateTimeOffset? UpdatedAtUtc { get; set; }
+    public string? UpdatedBy { get; set; }
+}
+
+services.AddMecesoftAuditing<CurrentUserProvider>();
+services.AddDbContext<AppDbContext>((serviceProvider, options) =>
+    options.UseSqlServer(connectionString)
+           .AddMecesoftAuditing(serviceProvider));
+```
+
+Audit interceptor yalnızca `ICreationAuditable`/`IModificationAuditable` implement eden entity'lere
+dokunur. Hiçbir entity'ye audit alanı zorunlu kılmaz ve yetkilendirme yapmaz.
+
+### Tenant senaryoları
+
+1. **Tenant yok**: Standart `DbContext` + `Repository<TEntity, TContext>` / `UnitOfWork<TContext>`.
+2. **DB-per-tenant**: Her tenant için ayrı veritabanı. Scoped connection-string resolver:
+
+```csharp
+services.AddMecesoftTenantData<AppDbContext, TenantConnectionStringResolver>(
+    (options, connectionString) => options.UseSqlServer(connectionString));
+services.AddMecesoftRepository<AppDbContext, Order>();
+```
+
+Resolver scoped olmalı ve tenant çözülemezse fail-closed hata vermelidir.
+
+3. **Row-per-tenant**: `MecesoftDbContext` + `EfReadRepository`/`EfWriteRepository`/`EfSoftDeleteRepository`.
+   Tenant filtresi, read/write grant'leri, satır sahipliği doğrulaması ve soft-delete yetkilendirmesi
+   aynen korunur. `Mecesoft.Repository` uyumluluk katmanı bu güvenlik modelinin yerine geçmez;
+   doğrudan legacy okuma grant yoksa fail-closed olur.
+
+### Dependency Injection
+
+```csharp
+services.AddMecesoftData<AppDbContext>(options =>
+    options.UseSqlServer(connectionString));
+
+services.AddMecesoftRepository<AppDbContext, Order>();
+services.AddMecesoftRepository<AppDbContext, OrderLine>();
+
+// Scoped olarak çözülür:
+IUnitOfWork unitOfWork = serviceProvider.GetRequiredService<IUnitOfWork>();
+IRepository<Order> orders = serviceProvider.GetRequiredService<IRepository<Order>>();
+```
+
+`AddMecesoftData` yalnızca standart/Identity/kullanıcı context'leri içindir; `MecesoftDbContext`
+için mevcut `AddMecesoftDbContext` ve güvenli repository kayıtları kullanılmalıdır.
+
+### Uyumluluk katmanının sınırları
+
+- `Mecesoft.Repository` API'si güvenlik sınırı değildir; resolver grant'leri uygulamaz.
+- `MecesoftDbContext` üzerinde read/write grant, tenant filter ve SaveChanges doğrulaması yine zorunludur.
+- `includeDeleted` yalnızca adlandırılmış soft-delete filtresini kaldırır; tenant filtresini kaldırmaz.
+- `Delete`/`DeleteRange` fiziksel silme yapar. Soft delete için `SoftDeleteService` veya güvenli
+  soft-delete repository kullanılmalıdır.
+- `SoftDeleteService` ve audit interceptor yetkilendirme yapmaz.
+- DB-per-tenant resolver tenant çözülemediğinde ortak bir fallback veritabanına dönmemelidir.
+- `IgnoreQueryFilters()` ve `IgnoreQueryFilters([MecesoftQueryFilterKeys.Tenant])` hâlâ merkezi
+  doğrulamayı atlayan bypass'lardır; üretim kodunda kullanılmamalıdır.
+
+Ayrıntılı geçiş adımları için [Migration Guide](docs/migration-from-mecesoft-repository.md) ve
+sürüm notları için [CHANGELOG](CHANGELOG.md) dosyalarına bakın.
 
 ## Güvenlik sınırı
 
@@ -197,4 +473,6 @@ dotnet build -c Release --no-restore
 dotnet test -c Release --no-build
 ```
 
-Provider entegrasyonları, transaction davranışı ve tenant güvenliği sonraki fazlarda gerçek veritabanlarıyla ayrıca doğrulanacaktır.
+SQL Server ve PostgreSQL entegrasyon testleri, `MECESOFT_SQLSERVER_TEST_CONNECTION` ve
+`MECESOFT_POSTGRES_TEST_CONNECTION` ortam değişkenleri tanımlandığında çalışır. README ve migration
+guide örnekleri `tests/Mecesoft.Data.DocumentationSamples` projesinde derlenerek doğrulanır.

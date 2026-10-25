@@ -199,15 +199,17 @@ jobs:
         run: |
           set -euo pipefail
           cd artifacts/packages
+          version="$(sed -n 's:.*<Version>\([^<]*\)</Version>.*:\1:p' ../../Directory.Build.props | head -n1)"
+          test -n "$version"
 
           test "$(find . -maxdepth 1 -name '*.nupkg' | wc -l)" -eq 4
           test "$(find . -maxdepth 1 -name '*.snupkg' | wc -l)" -eq 4
 
           expected_packages=(
-            Mecesoft.Data.Abstractions.1.0.0.nupkg
-            Mecesoft.Data.EntityFrameworkCore.1.0.0.nupkg
-            Mecesoft.Data.EntityFrameworkCore.SqlServer.Tenancy.1.0.0.nupkg
-            Mecesoft.Data.EntityFrameworkCore.PostgreSql.Tenancy.1.0.0.nupkg
+            "Mecesoft.Data.Abstractions.${version}.nupkg"
+            "Mecesoft.Data.EntityFrameworkCore.${version}.nupkg"
+            "Mecesoft.Data.EntityFrameworkCore.SqlServer.Tenancy.${version}.nupkg"
+            "Mecesoft.Data.EntityFrameworkCore.PostgreSql.Tenancy.${version}.nupkg"
           )
 
           for package in "${expected_packages[@]}"; do
@@ -217,15 +219,15 @@ jobs:
             fi
 
             nuspec=$(unzip -p "$package" '*.nuspec')
-            expected_id="${package%.1.0.0.nupkg}"
+            expected_id="${package%.${version}.nupkg}"
 
             if ! grep -q "<id>${expected_id}</id>" <<<"$nuspec"; then
               echo "$package: package id ${expected_id} is missing"
               exit 1
             fi
 
-            if ! grep -q '<version>1.0.0</version>' <<<"$nuspec"; then
-              echo "$package: version 1.0.0 is missing"
+            if ! grep -q "<version>${version}</version>" <<<"$nuspec"; then
+              echo "$package: version ${version} is missing"
               exit 1
             fi
 
@@ -275,7 +277,7 @@ jobs:
             trap - EXIT
           done
 
-          sqlserver_nuspec=$(unzip -p Mecesoft.Data.EntityFrameworkCore.SqlServer.Tenancy.1.0.0.nupkg '*.nuspec')
+          sqlserver_nuspec=$(unzip -p "Mecesoft.Data.EntityFrameworkCore.SqlServer.Tenancy.${version}.nupkg" '*.nuspec')
           if grep -q 'System.Security.Cryptography.Pkcs" version="10.0.13"' <<<"$sqlserver_nuspec"; then
             echo "Pkcs security pin present"
           else

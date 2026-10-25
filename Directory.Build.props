@@ -11,7 +11,7 @@
     <Deterministic>true</Deterministic>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
 
-    <Version>1.0.0</Version>
+    <Version>1.1.0</Version>
     <Authors>Mecesoft</Authors>
     <Company>Mecesoft</Company>
     <Product>Mecesoft.Data</Product>
@@ -20,7 +20,7 @@
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
     <PackageProjectUrl>https://github.com/Mecesoft/Mecesoft.Data</PackageProjectUrl>
-    <PackageReleaseNotes>Initial 1.0.0 release.</PackageReleaseNotes>
+    <PackageReleaseNotes>1.1.0: restores Mecesoft.Repository compatibility, standard/Identity DbContext support, general-purpose unit of work, detached concurrency helpers, and optional soft-delete/audit services.</PackageReleaseNotes>
     <RepositoryUrl>https://github.com/Mecesoft/Mecesoft.Data</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
     <PublishRepositoryUrl>true</PublishRepositoryUrl>

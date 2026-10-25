@@ -1,0 +1,311 @@
+name: NuGet Publish
+
+# Manual, approval-gated publishing through NuGet Trusted Publishing (OIDC).
+# No long-lived NuGet API key is stored in this repository.
+#
+# Required one-time setup (see the PHASE 6E report for details):
+#   - GitHub environment `nuget` with at least one required reviewer and a
+#     deployment branch policy restricted to `main`.
+#   - Repository or `nuget` environment secret `NUGET_USER` containing the
+#     nuget.org profile name (not the e-mail address).
+#   - nuget.org Trusted Publishing policy:
+#       owner: Mecesoft
+#       repository: Mecesoft.Data
+#       workflow: nuget-publish.yml
+#       environment: nuget
+#       package pattern: Mecesoft.Data.*
+#       scope: push new packages and new package versions
+
+run-name: "Publish Mecesoft.Data ${{ inputs.version }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Package version to publish (must match Directory.Build.props)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nuget-publish
+  cancel-in-progress: false
+
+env:
+  DOTNET_NOLOGO: "true"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "true"
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: "true"
+  NUGET_SOURCE: "https://api.nuget.org/v3/index.json"
+  PACKAGES_DIR: "artifacts/packages"
+
+jobs:
+  validate:
+    name: Validate release artifact
+    if: ${{ github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      version: ${{ steps.metadata.outputs.version }}
+      commit: ${{ steps.metadata.outputs.commit }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Enforce main branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF}" != "refs/heads/main" ]]; then
+            echo "::error::Publishing is only allowed from refs/heads/main (got ${GITHUB_REF})."
+            exit 1
+          fi
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: "10.0.402"
+
+      - name: Verify current main head
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          main_sha="$(gh api "repos/${GITHUB_REPOSITORY}/commits/main" --jq .sha)"
+          if [[ "$main_sha" != "${GITHUB_SHA}" ]]; then
+            echo "::error::Dispatch commit ${GITHUB_SHA} is not the current main head (${main_sha}). Re-run from main."
+            exit 1
+          fi
+          echo "main head matches ${GITHUB_SHA}"
+
+      - name: Verify CI success for this commit
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          runs="$(gh run list --repo "${GITHUB_REPOSITORY}" --workflow ci.yml \
+            --commit "${GITHUB_SHA}" --event push --limit 20 \
+            --json databaseId,headSha,headBranch,status,conclusion,url)"
+          latest="$(jq -c 'sort_by(.databaseId) | reverse | .[0] // empty' <<<"$runs")"
+
+          if [[ -z "$latest" ]]; then
+            echo "::error::No CI run found for commit ${GITHUB_SHA}."
+            exit 1
+          fi
+
+          echo "Latest CI run: ${latest}"
+
+          if ! jq -e --arg sha "${GITHUB_SHA}" \
+              '(.headSha == $sha) and (.headBranch == "main") and (.status == "completed") and (.conclusion == "success")' \
+              <<<"$latest" > /dev/null; then
+            echo "::error::The latest CI run for ${GITHUB_SHA} is not successful."
+            exit 1
+          fi
+
+      - name: Restore
+        run: dotnet restore Mecesoft.Data.sln
+
+      - name: Pack
+        shell: bash
+        env:
+          CI: "true"
+        run: |
+          set -euo pipefail
+          mkdir -p "$PACKAGES_DIR"
+          dotnet pack src/Mecesoft.Data.Abstractions/Mecesoft.Data.Abstractions.csproj -c Release --no-restore -o "$PACKAGES_DIR"
+          dotnet pack src/Mecesoft.Data.EntityFrameworkCore/Mecesoft.Data.EntityFrameworkCore.csproj -c Release --no-restore -o "$PACKAGES_DIR"
+          dotnet pack src/Mecesoft.Data.EntityFrameworkCore.SqlServer.Tenancy/Mecesoft.Data.EntityFrameworkCore.SqlServer.Tenancy.csproj -c Release --no-restore -o "$PACKAGES_DIR"
+          dotnet pack src/Mecesoft.Data.EntityFrameworkCore.PostgreSql.Tenancy/Mecesoft.Data.EntityFrameworkCore.PostgreSql.Tenancy.csproj -c Release --no-restore -o "$PACKAGES_DIR"
+
+      - name: Validate packages
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          ./.github/scripts/validate-release-packages.sh \
+            --packages-dir "${PACKAGES_DIR}" \
+            --expected-version "${VERSION}" \
+            --expected-commit "${GITHUB_SHA}" \
+            --source-repository "${GITHUB_REPOSITORY}"
+
+      - name: Generate checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PACKAGES_DIR"
+          sha256sum ./*.nupkg ./*.snupkg > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Record release metadata
+        id: metadata
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "commit=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: nuget-packages
+          path: |
+            artifacts/packages/*.nupkg
+            artifacts/packages/*.snupkg
+            artifacts/packages/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish to nuget.org
+    needs: validate
+    if: ${{ github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: nuget
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Enforce main branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF}" != "refs/heads/main" ]]; then
+            echo "::error::Publishing is only allowed from refs/heads/main (got ${GITHUB_REF})."
+            exit 1
+          fi
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: "10.0.402"
+
+      - name: Download release artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: nuget-packages
+          path: artifacts/packages
+
+      - name: Verify checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd artifacts/packages
+          sha256sum --check --strict SHA256SUMS
+
+      - name: Re-validate downloaded packages
+        shell: bash
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+          COMMIT: ${{ needs.validate.outputs.commit }}
+        run: |
+          set -euo pipefail
+          ./.github/scripts/validate-release-packages.sh \
+            --packages-dir artifacts/packages \
+            --expected-version "${VERSION}" \
+            --expected-commit "${COMMIT}" \
+            --source-repository "${GITHUB_REPOSITORY}"
+
+      - name: Verify main head is still the dispatch commit
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          main_sha="$(gh api "repos/${GITHUB_REPOSITORY}/commits/main" --jq .sha)"
+          if [[ "$main_sha" != "${GITHUB_SHA}" ]]; then
+            echo "::error::main moved to ${main_sha} while awaiting approval. Re-dispatch from the new main."
+            exit 1
+          fi
+
+      - name: NuGet login (OIDC)
+        id: nuget-login
+        uses: NuGet/login@8d196754b4036150537f80ac539e15c2f1028841 # v1
+        with:
+          user: ${{ secrets.NUGET_USER }}
+
+      - name: Publish packages
+        shell: bash
+        env:
+          NUGET_API_KEY: ${{ steps.nuget-login.outputs.NUGET_API_KEY }}
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          set -euo pipefail
+          echo "::add-mask::${NUGET_API_KEY}"
+
+          # Dependency order: abstractions, EF Core, then the two providers.
+          # Duplicate versions are never skipped: any conflict aborts the release.
+          packages=(
+            "Mecesoft.Data.Abstractions.${VERSION}.nupkg"
+            "Mecesoft.Data.EntityFrameworkCore.${VERSION}.nupkg"
+            "Mecesoft.Data.EntityFrameworkCore.SqlServer.Tenancy.${VERSION}.nupkg"
+            "Mecesoft.Data.EntityFrameworkCore.PostgreSql.Tenancy.${VERSION}.nupkg"
+          )
+
+          for package in "${packages[@]}"; do
+            echo "::group::Pushing ${package}"
+            if ! dotnet nuget push "artifacts/packages/${package}" \
+                --api-key "${NUGET_API_KEY}" \
+                --source "${NUGET_SOURCE}" \
+                --timeout 300; then
+              echo "::error::Failed to publish ${package}. Stopping; no further packages were pushed."
+              exit 1
+            fi
+            echo "::endgroup::"
+          done
+
+      - name: Verify packages are visible on nuget.org
+        shell: bash
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          set -euo pipefail
+          ids=(
+            "Mecesoft.Data.Abstractions"
+            "Mecesoft.Data.EntityFrameworkCore"
+            "Mecesoft.Data.EntityFrameworkCore.SqlServer.Tenancy"
+            "Mecesoft.Data.EntityFrameworkCore.PostgreSql.Tenancy"
+          )
+
+          missing=0
+          for id in "${ids[@]}"; do
+            lower="${id,,}"
+            url="https://api.nuget.org/v3-flatcontainer/${lower}/${VERSION}/${lower}.${VERSION}.nupkg"
+            visible=false
+            for attempt in {1..12}; do
+              if curl -fsSL -o /dev/null --max-time 20 "$url"; then
+                visible=true
+                break
+              fi
+              sleep 10
+            done
+
+            if [[ "$visible" == "true" ]]; then
+              echo "visible: ${id} ${VERSION}"
+            else
+              missing=1
+              echo "::warning::${id} ${VERSION} was pushed but is not visible on nuget.org yet."
+            fi
+          done
+
+          if [[ "$missing" -ne 0 ]]; then
+            echo "::warning::Push succeeded, but nuget.org visibility verification timed out. Do not re-run this workflow; verify the packages on nuget.org manually."
+          fi
